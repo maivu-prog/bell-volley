@@ -159,6 +159,58 @@ var BELL_R = 1.02;            /* A bell used to subtend about 4 degrees from the
                                  apart, turn each wing into a WALL - miss one and you catch its
                                  neighbour, and the rebound carries you into a third. */
 var RETOUCH = 0.055;          /* a stone cannot be touched twice inside this, even on re-entry */
+/* S23. A bell was a SPHERE, and the court is 4.8 deep while the wings hang at z = +-0.871: a stone
+   that had drifted in z sat right on top of a bell ON SCREEN (the camera is low, so depth projects
+   to almost nothing) while being 1.9 u away in 3D - it flew straight through without a sound, and
+   zprobe measured one such pass-through overlapping by 86% of the stone's own width. Depth is
+   declared SHALLOW on purpose at the top of this file, so depth is not allowed to decide a hit:
+   the bell is a CYLINDER lying along z, and the bounce normal drops its z so the rebound stays in
+   the plane the player aimed in. BELL_R itself is untouched - it is calibrated against the aim
+   angle from the launch point and nothing here is allowed to move it. */
+/* half-length of that cylinder, as a multiple of (s.r + BELL_R). At 1.0 zprobe still caught 5
+   pass-throughs per 80 s, all in the tail of the drift (dz 1.84 against a 1.82 collider): the
+   cylinder has to be WIDER THAN THE COURT, or depth is still quietly deciding hits at the edges.
+   2.8 * 1.64 = 4.6 u > 3.55 (half-depth) + 0.871 (bell z), so nothing in the court is out of reach.
+   Safe to go this wide because no two bells overlap once z is dropped: within a wing, the bells
+   that differ in z also differ in x by 1.75 u and in y by pitch 2.15, both over any collider. */
+var BELL_HZ = 2.8;
+/* ...and the same drift is pulled back to the aiming plane, because a stone parked out at z = 2.9
+   could still never reach the far wing however generous the collider is. Critically damped against
+   the existing 1.7 drag (1.7 >= 2*sqrt(KZ)), so z glides home and never springs. */
+var KZ = 0.70;
+/* What is DRAWN must be what is MEASURED. A bell leans up to 0.35 rad when it rattles, which swings
+   its lip sideways by 0.67*sin(lean); the collider grows by exactly that so a swinging bell is as
+   big as it looks. */
+function bellRad(b){ return BELL_R + 0.67 * Math.abs(Math.sin(b.sw * 0.5)); }
+/* THE DROP LANE. "Two wings with a clear lane down the middle" is the design, and it has to be
+   clear by ARITHMETIC, not by hope: a stone that merely falls must not be able to graze an inner
+   bell, or doing nothing scores. It scored 150 before this (and 500 once z stopped accidentally
+   saving it), which is the second time this exact lane has leaked - see reset()'s note about fit()
+   dragging the bells in. So the wing is pushed out to BELL_IN and the spawn spread is DERIVED from
+   it, in world units: the old spread was 0.14*AX, which is 0.77 u on a phone and 1.27 u on a
+   laptop - the lane was a different width on every machine. */
+/* The wings stay exactly where they were tuned - a wing has to be a tight COLUMN or the verb feels
+   like it does nothing (the original build rang ONE bell in 110 s with sparse targets, and pushing
+   the wings out to 2.95 to make a wide lane reproduced that: 5 bells in 40 s instead of 20+).
+   The lane does not need to be WIDE. It only needs to CONTAIN the spawn jitter, which is cosmetic:
+   0.10 u of jitter leaves 0.15 u of daylight between the biggest stone and the inner bell, and an
+   untouched stone has vx = 0 for its whole fall, so that daylight is a proof and not a hope. */
+var BELL_IN = 2.15;
+var BELL_OUT = 1.75;
+function laneHW(){
+  var maxR = 0;
+  for (var i = 0; i < KINDS.length; i++) if (KINDS[i].r > maxR) maxR = KINDS[i].r;
+  return Math.max(0.1, BELL_IN - (maxR + BELL_R) - 0.18);   /* 0.18 = a hair of daylight */
+}
+/* the one hit test. Returns null, or the in-plane normal and the distance to push out to. */
+function bellOverlap(px, py, pz, r, b){
+  var dx = px - b.home.x, dy = py - b.home.y, dz = pz - b.home.z;
+  var minD = r + bellRad(b);
+  if (Math.abs(dz) > BELL_HZ * minD) return null;
+  var dp = Math.sqrt(dx * dx + dy * dy);
+  if (dp >= minD || dp < 1e-5) return null;
+  return { nx:dx / dp, ny:dy / dp, minD:minD };
+}
 function spawnGap(w){ return Math.max(1.15, 2.3 - 0.28 * w); }
 var LIVES = 3;
 var COMBO_PTS = 10, SHATTER_PTS = 40, COMBO_CAP = 9;
@@ -286,7 +338,9 @@ function makeBell(nx, ny, nz, hp, noteIx){
   body.castShadow = true; g.add(body);
   var crown = new T.Mesh(new T.SphereGeometry(BELL_R * 0.5, 16, 10), mat(col, 0.3, 0.7));
   crown.position.y = 0.72; g.add(crown);
-  var lip = new T.Mesh(new T.TorusGeometry(BELL_R * 0.98, 0.1, 8, 24), mat(col, 0.3, 0.7));
+  /* outer edge = BELL_R*0.92 + 0.08 = 1.018, i.e. inside BELL_R. At 0.98 + 0.1 it reached 1.10 and
+     the bell looked 8% wider than it measured - the player aimed at the rim and missed. */
+  var lip = new T.Mesh(new T.TorusGeometry(BELL_R * 0.92, 0.08, 8, 24), mat(col, 0.3, 0.7));
   lip.rotation.x = Math.PI / 2; lip.position.y = -0.67; g.add(lip);
   var clap = new T.Mesh(new T.SphereGeometry(0.2, 10, 8), mat(0x5c4432, 0.6, 0.3));
   clap.position.y = -0.58; g.add(clap);
@@ -337,8 +391,13 @@ function layoutBells(wave){
     var base = bBot + (sgn > 0 ? pitch * 0.5 : 0);
     for (var i = 0; i < per; i++){
       var y = Math.min(ROOF_Y - 1.5, base + i * pitch);
-      var nx = sgn * ((2.15 + (i % 2) * 1.75) / (AX * BRF));   /* inner wall of the wing clears the lane */
-      var nz = ((i % 2) - 0.5) * 0.55;
+      var nx = sgn * ((BELL_IN + (i % 2) * BELL_OUT) / (AX * BRF));   /* inner wall clears the lane */
+      /* z = 0, for every bell. The stagger used to be +-0.871 u, purely for depth in the picture,
+         and it was the root of the pass-through: on this low camera a depth offset projects to a
+         small VERTICAL offset, so a stone the player saw sitting on a bell was nearly 2 u away in
+         3D. The wings are already interleaved where the eye can read it - inner/outer by 1.75 u in
+         x, and the two wings by half a pitch in y - so nothing is lost. Now drawn == measured. */
+      var nz = 0;
       var hp = (wave >= 2 && i === per - 1) ? 2 : 1;
       makeBell(nx, nyOf(y), nz, hp, note++);
     }
@@ -347,6 +406,9 @@ function layoutBells(wave){
 
 /* ---------- stones ---------- */
 var stones = [];
+/* probe bookkeeping (zprobe.js): a stable id per stone and a log of which (stone,bell) pair
+   actually rang, so a gate can tell "overlapped on screen" apart from "was counted as a hit". */
+var sidSeq = 0, hitPairs = [];
 function spawnStone(kindIx, x, z, y){
   var k = KINDS[Math.min(kindIx, KINDS.length - 1)];
   var r = k.r;
@@ -354,7 +416,8 @@ function spawnStone(kindIx, x, z, y){
     k:k, r:r, m:massOf(k, r),
     p:new T.Vector3(x, y === undefined ? ROOF_Y - 1.3 : y, z),
     v:new T.Vector3(0, -0.6, 0),
-    sq:0, flash:0, lastTouch:-9, born:performance.now(), spin:new T.Vector3(0,0,0)
+    sq:0, flash:0, lastTouch:-9, born:performance.now(), spin:new T.Vector3(0,0,0),
+    sid:++sidSeq
   };
   var geo = k.id === 'ice' ? new T.IcosahedronGeometry(r, 0) : new T.SphereGeometry(r, 18, 12);
   s.mesh = new T.Mesh(geo, new T.MeshStandardMaterial({ color:k.col, roughness:0.55, metalness:0.1 }));
@@ -420,7 +483,7 @@ function reset(wave){
      bent layout. */
   fit();
   layoutBells(G.wave);
-  var first = spawnStone(Math.min(G.wave, KINDS.length - 1), -AX * 0.06, AZ * 0.08, ROOF_Y - 1.4);
+  var first = spawnStone(Math.min(G.wave, KINDS.length - 1), -laneHW() * 0.35, 0, ROOF_Y - 1.4);
   first.v.set(0, 0, 0);                     /* it must hang a beat before it starts to fall */
 }
 
@@ -535,6 +598,11 @@ var lastOFrac = 0, aimOut = new T.Vector3();
 function aimVel(s, tAlong){
   var closest = new T.Vector3().copy(rayD).multiplyScalar(tAlong).add(rayO);
   var off = s.p.clone().sub(closest);
+  /* S23: the steer is taken IN THE AIMING PLANE. The ray points into the screen, so a stone that
+     was already off-plane got pushed further off-plane by its own touch - that is where the z
+     drift that caused the pass-throughs was manufactured. Zeroing z here also makes lastOFrac the
+     offset the player can actually see, instead of one inflated by invisible depth. */
+  off.z = 0;
   var oLen = off.length();
   lastOFrac = Math.min(1, oLen / (s.r + PAD));
   var dir;
@@ -655,6 +723,15 @@ function dropStone(s, why){
 }
 
 function bellHit(b, s){
+  if (hitPairs.length < 4000){
+    /* recorded HERE, not sampled by a probe: the collision is resolved before the next frame, so
+       by then the stone has already been pushed clear and any frame-rate gate reads a lie. */
+    var hsc = toScreen(s.p), hbc = toScreen(b.home);
+    var hsr = Math.abs(toScreen(s.p.clone().add(new T.Vector3(s.r, 0, 0))).x - hsc.x);
+    var hbr = Math.abs(toScreen(b.home.clone().add(new T.Vector3(bellRad(b), 0, 0))).x - hbc.x);
+    var gap = (Math.hypot(hsc.x - hbc.x, hsc.y - hbc.y) - (hsr + hbr)) / Math.max(1, hsr * 2);
+    hitPairs.push(s.sid + ':' + bells.indexOf(b) + '|' + gap.toFixed(3));
+  }
   b.hp--;
   b.flash = 1;
   b.swv = 6.5 * Math.sign(s.v.x || 1);
@@ -735,22 +812,21 @@ function step(dt){
        on an axis the player cannot see from this camera - unfair in a way they could not read.
        Nothing visible says otherwise, because stones now simply stay in the plane they are aimed in. */
     s.v.z *= Math.exp(-1.7 * dt);
+    s.v.z -= KZ * s.p.z * dt;
     var zl = AZ * 0.74 - s.r;
     if (Math.abs(s.p.z) > zl){ s.p.z = Math.sign(s.p.z) * zl; s.v.z *= -0.45; }
     /* bells */
     for (j = 0; j < bells.length; j++){
       var b = bells[j];
       if (!b.alive) continue;
-      var dx = s.p.x - b.home.x, dy = s.p.y - b.home.y, dz = s.p.z - b.home.z;
-      var dd = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      var minD = s.r + BELL_R;
-      if (dd < minD && dd > 1e-5){
-        var nx = dx / dd, ny = dy / dd, nz = dz / dd;
-        s.p.set(b.home.x + nx * minD, b.home.y + ny * minD, b.home.z + nz * minD);
-        var vn = s.v.x * nx + s.v.y * ny + s.v.z * nz;
+      var ov = bellOverlap(s.p.x, s.p.y, s.p.z, s.r, b);
+      if (ov){
+        var nx = ov.nx, ny = ov.ny, minD = ov.minD;
+        s.p.set(b.home.x + nx * minD, b.home.y + ny * minD, s.p.z);
+        var vn = s.v.x * nx + s.v.y * ny;
         var rest = REST_BELL * s.k.rest;
-        s.v.x -= (1 + rest) * vn * nx; s.v.y -= (1 + rest) * vn * ny; s.v.z -= (1 + rest) * vn * nz;
-        s.v.x += nx * BELL_KICK; s.v.y += ny * BELL_KICK; s.v.z += nz * BELL_KICK;
+        s.v.x -= (1 + rest) * vn * nx; s.v.y -= (1 + rest) * vn * ny;
+        s.v.x += nx * BELL_KICK; s.v.y += ny * BELL_KICK;
         if (s.v.length() > VMAX) s.v.setLength(VMAX);
         s.sq = 1; s.flash = Math.max(s.flash, 0.8);
         bellHit(b, s);
@@ -767,12 +843,21 @@ function step(dt){
     /* Pressure comes from the CLOCK, not only from clearing waves. With one stone forever, a
        player who can keep one stone up never loses: the human bot sat at 100 s with three lives
        untouched. A stone joins every 17 s, so a round lands in the 30-90 s window by itself. */
+    /* UNCHANGED, and that was worth proving. Once a bell rings whenever the stone is on it, a good
+       player keeps a stone alive longer, and one run put the round at 95.8 s against a 30-90 s
+       window - so the clock was retuned to 14 s and then 11 s, which overshot to 25 s. The 95.8
+       was an orphaned headless browser eating 44% of a core, not the game: on a clean machine the
+       ORIGINAL 17 s / cap 4 gives 68.3 s. Lesson in FEEL-3D S26 - check the machine before you
+       retune the game. */
     G.waveStones = Math.min(4, 1 + Math.floor((performance.now() - G.startT) / 17000) + (G.wave > 0 ? 1 : 0));
     G.spawnT -= dt;
     if (G.spawnT <= 0 && stones.length < G.waveStones){
       var kix = Math.floor(Math.random() * Math.min(KINDS.length, G.wave + 1));
-      var a = Math.random() * Math.PI * 2, rr = Math.random() * 0.14;
-      spawnStone(kix, Math.cos(a) * rr * AX, Math.sin(a) * rr * AZ);
+      var a = Math.random() * Math.PI * 2, rr = Math.random();
+      /* inside the lane, and only inside it. z gets a quarter of that: stones belong in the aiming
+         plane, and the only thing the old wide z spread bought was depth in the picture - at the
+         cost of whole bells being unreachable for whichever stone happened to spawn deep. */
+      spawnStone(kix, Math.cos(a) * rr * laneHW(), Math.sin(a) * rr * laneHW() * 0.25);
       G.spawnT = spawnGap(G.wave);
     }
   }
@@ -1054,7 +1139,7 @@ window.__toy = {
   stoneList: function(){
     return stones.map(function(s){
       var sc = toScreen(s.p);
-      return { id:s.k.id, r:s.r, m:s.m, x:s.p.x, y:s.p.y, z:s.p.z,
+      return { id:s.k.id, sid:s.sid, r:s.r, m:s.m, x:s.p.x, y:s.p.y, z:s.p.z,
                vx:s.v.x, vy:s.v.y, vz:s.v.z, sx:sc.x, sy:sc.y,
                rpx:Math.abs(toScreen(s.p.clone().add(new T.Vector3(s.r, 0, 0))).x - sc.x) };
     });
@@ -1064,6 +1149,33 @@ window.__toy = {
       var sc = toScreen(b.home);
       return { x:b.home.x, y:b.home.y, z:b.home.z, hp:b.hp, sx:sc.x, sy:sc.y };
     });
+  },
+  /* S23: what the SCREEN says. Every (stone, live bell) pair whose discs overlap in pixels right
+     now, whether or not the 3D test agreed. A gate compares this against takeHits(): a pair that
+     overlaps on screen and never rings is the bug chi Mai reported ("cham chuong ma xuyen qua"). */
+  ovl: function(){
+    var out = [];
+    function flat(v){ return new T.Vector3(v.x, v.y, 0); }
+    var bl = bells;
+    for (var i = 0; i < stones.length; i++){
+      var s = stones[i], sc = toScreen(flat(s.p));
+      var srp = Math.abs(toScreen(flat(s.p).add(new T.Vector3(s.r, 0, 0))).x - sc.x);
+      for (var j = 0; j < bl.length; j++){
+        var b = bl[j];
+        if (!b.alive) continue;
+        var bc = toScreen(flat(b.home));
+        var brp = Math.abs(toScreen(flat(b.home).add(new T.Vector3(bellRad(b), 0, 0))).x - bc.x);
+        var dpx = Math.hypot(sc.x - bc.x, sc.y - bc.y);
+        if (dpx < srp + brp) out.push({ k:s.sid + ':' + j, sid:s.sid, bid:j, dpx:dpx, sumpx:srp + brp,
+                                        srp:srp, brp:brp, sz:s.p.z, bz:b.home.z, sy:s.p.y });
+      }
+    }
+    return out;
+  },
+  takeHits: function(){ var a = hitPairs.slice(); hitPairs.length = 0; return a; },
+  bellBand: function(){
+    var ys = bells.filter(function(b){ return b.alive; }).map(function(b){ return b.home.y; });
+    return { lo:Math.min.apply(null, ys), hi:Math.max.apply(null, ys) };
   },
   /* what this touch would do, using the game's own aim maths - the bot has to plan before it
      taps, and must not plan against a second copy of the rules. */
@@ -1081,7 +1193,7 @@ window.__toy = {
     var p = { x:st.x, y:st.y, z:st.z }, v = { x:st.vx, y:st.vy, z:st.vz };
     var out = [], n = Math.round(secs / FIXED);
     for (var i = 0; i < n; i++){
-      v.y -= GY * FIXED; v.z *= Math.exp(-1.7 * FIXED);
+      v.y -= GY * FIXED; v.z *= Math.exp(-1.7 * FIXED); v.z -= KZ * p.z * FIXED;
       p.x += v.x * FIXED; p.y += v.y * FIXED; p.z += v.z * FIXED;
       if (p.y + st.r > ROOF_Y - 0.22){ p.y = ROOF_Y - 0.22 - st.r; if (v.y > 0) v.y = -v.y * REST_ROOF; }
       if (i % 3 === 0) out.push({ x:p.x, y:p.y, z:p.z });
@@ -1119,7 +1231,7 @@ window.__feel = {
   consts: function(){
     return { T_FALL:T_FALL, IMP_F:IMP_F, LOW_F:LOW_F, IMP:IMP, REF_M:REF_M, LOW_K:LOW_K, LOW_Y:LOW_Y, SIDE:SIDE, UP_CUT:UP_CUT, PAD:PAD,
              HAND_K:HAND_K, GY:GY, FIXED:FIXED, VMAX:VMAX, REST_BELL:REST_BELL, BELL_KICK:BELL_KICK,
-             AX:AX, AZ:AZ, ROOF_Y:ROOF_Y, BRF:BRF, RETOUCH:RETOUCH };
+             AX:AX, AZ:AZ, ROOF_Y:ROOF_Y, BRF:BRF, RETOUCH:RETOUCH, BELL_R:BELL_R, BELL_HZ:BELL_HZ, KZ:KZ };
   },
   tune: function(o){
     if (o.IMP !== undefined) IMP = o.IMP;
@@ -1132,6 +1244,9 @@ window.__feel = {
     if (o.IMP_F !== undefined){ IMP_F = o.IMP_F; scaleToShaft(); }
     if (o.LOW_F !== undefined){ LOW_F = o.LOW_F; scaleToShaft(); }
     if (o.T_FALL !== undefined){ T_FALL = o.T_FALL; scaleToShaft(); }
+    /* S12: the two new constants have to be knobs, or no gate can prove it is measuring them */
+    if (o.BELL_HZ !== undefined) BELL_HZ = o.BELL_HZ;
+    if (o.KZ !== undefined) KZ = o.KZ;
   },
   freeze: function(b){ frozen = !!b; },
   resetDt: function(){ maxFrameMs = 0; stepCount = 0; guardHits = 0; maxTravel = 0; },
@@ -1206,7 +1321,7 @@ window.__feel = {
 
   /* 5. S9: no dead bells. From a stone resting mid-air over the courtyard, every live bell must be
      reachable by some touch - search the touch offset, simulate, and count. */
-  reachTest: function(){
+  reachTest: function(zAt){
     var live = bells.filter(function(b){ return b.alive; });
     var reached = 0, rows = [];
     live.forEach(function(b){
@@ -1214,26 +1329,34 @@ window.__feel = {
       for (var fi = -1; fi <= 1 && !got; fi += 0.25){
         for (var hi = 0; hi < 3 && !got; hi++){
           var sy = [1.2, 2.6, 4.2][hi];
-          var s = lab(KINDS[0], b.home.x * 0.35, sy, b.home.z * 0.35);
+          var sz = (zAt === undefined || zAt === null) ? b.home.z * 0.35 : zAt;
+          /* S23 again, and this one had been lying since the first build: the stone was parked at
+             b.home.x * 0.35 - already 35% of the way to the wing it was being asked to reach.
+             Real stones spawn IN THE LANE and fall straight down, so the gate starts there, on the
+             far side of the lane from the bell: the worst x the round can actually produce. */
+          var s = lab(KINDS[0], -Math.sign(b.home.x || 1) * laneHW(), sy, sz);
           var sc = toScreen(s.p);
           var rpx = Math.abs(toScreen(s.p.clone().add(new T.Vector3(s.r, 0, 0))).x - sc.x);
           window.__toy.tap(sc.x + fi * rpx, sc.y);
           /* fly it forward by hand: pure ballistics, no bells, no floor */
           var p = s.p.clone(), v = s.v.clone();
           for (var t = 0; t < 320; t++){
-            v.y -= GY * FIXED; p.addScaledVector(v, FIXED);
-            var d = p.distanceTo(b.home);
+            v.y -= GY * FIXED;
+            v.z *= Math.exp(-1.7 * FIXED); v.z -= KZ * p.z * FIXED;
+            p.addScaledVector(v, FIXED);
+            var d = Math.hypot(p.x - b.home.x, p.y - b.home.y);
             if (d < bestD) bestD = d;
-            if (d < s.r + BELL_R){ got = true; break; }
+            if (bellOverlap(p.x, p.y, p.z, s.r, b)){ got = true; break; }
             if (p.y < -4) break;
           }
           labEnd();
         }
       }
       if (got) reached++;
-      rows.push({ y:Math.round(b.home.y * 10) / 10, ok:got, miss:Math.round(bestD * 100) / 100 });
+      rows.push({ y:Math.round(b.home.y * 10) / 10, z:Math.round(b.home.z * 100) / 100,
+                  ok:got, miss:Math.round(bestD * 100) / 100 });
     });
-    return { bells:live.length, reached:reached, rows:rows };
+    return { bells:live.length, reached:reached, zAt:(zAt === undefined ? null : zAt), rows:rows };
   },
 
   /* 6. S3: travel per physics step must stay under the smallest collider radius */

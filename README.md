@@ -1,5 +1,5 @@
 # bell-volley
 
-Bell Volley - one verb: touch a flying stone and it leaves on that frame, away from your finger. Keep it off the floor; drive it through the bells.
+Bell Volley - tap a falling stone and it springs away from your finger. Bells now ring whenever the stone is on them: depth no longer decides a hit.
 
 Play: https://maivu-prog.github.io/bell-volley/
